@@ -1,19 +1,62 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import re
+import shutil
 import tempfile
 import urllib.parse
 from io import BytesIO
+from typing import Any
 
 import aiohttp
+from pydantic import Field
+from pydantic.dataclasses import dataclass
 from PIL import Image as PILImage
 
 import astrbot.api.message_components as Comp
-from astrbot.api import logger
+from astrbot.api import FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image as MsgImage
 from astrbot.api.message_components import Reply
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.agent.message import TextPart
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.astr_agent_context import AstrAgentContext
+
+PLUGIN_ID = "astrbot_plugin_animetrace_llm"
+PLUGIN_AUTHOR = "Huli3"
+PLUGIN_DESC = "AnimeTrace 图片识别 fork：支持命令识图，并注册为 LLM 可主动调用的工具"
+PLUGIN_VERSION = "4.1.0"
+PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_animetrace_llm"
+
+CONFIG_SECTION = "animetrace_llm_settings"
+TOOL_NAME = "animetrace_identify_image"
+IMAGE_COMMAND = "at识图"
+AVATAR_COMMAND = "at头像识图"
+MODEL_COMMAND = "at模型"
+FALLBACK_MODEL_ID = "animetrace-yuri-4.2"
+
+DEFAULT_TOOL_REQUEST_KEYWORDS = [
+    "识图",
+    "识别图片",
+    "识别这张图",
+    "这是谁",
+    "哪个角色",
+    "角色是谁",
+    "出自哪里",
+    "出处",
+    "动漫",
+    "gal",
+    "galgame",
+]
+DEFAULT_TOOL_DESCRIPTION = (
+    "AnimeTrace 二次元图片识别工具。"
+    "当用户发送或引用图片，并询问图片里的动漫/GalGame/二次元角色、作品出处，"
+    "或者你自己无法确定图片内容时调用。"
+    "工具会返回候选角色和作品名，结果仅供参考，回答时要保留不确定性。"
+)
 
 DEFAULT_CONFIG = {
     "timeout_seconds": 30,
@@ -23,6 +66,11 @@ DEFAULT_CONFIG = {
     "max_crops": 5,
     "max_characters_per_role": 5,
     "forward_threshold": 0,
+    "llm_tool_enabled": True,
+    "inject_llm_tool_hint": True,
+    "llm_tool_max_results": 5,
+    "tool_request_keywords": DEFAULT_TOOL_REQUEST_KEYWORDS,
+    "tool_description": DEFAULT_TOOL_DESCRIPTION,
 }
 
 API_ERROR_CODES = {
@@ -44,16 +92,117 @@ API_ERROR_CODES = {
 }
 
 
+def _clean_text(value: Any, default: str = "") -> str:
+    text = str(value or "").strip()
+    return text or default
+
+
+def _read_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if lowered in {"0", "false", "no", "off", "disabled"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _read_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: int = 999999,
+) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return min(maximum, max(minimum, number))
+
+
+def _read_list(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        items = [_clean_text(item) for item in value]
+        return [item for item in items if item] or default
+    if isinstance(value, str):
+        normalized = value.replace("，", ",").replace("；", ";")
+        parts = [
+            item.strip()
+            for chunk in normalized.split(";")
+            for item in chunk.split(",")
+        ]
+        return [item for item in parts if item] or default
+    return default
+
+
+@dataclass
+class AnimeTraceIdentifyTool(FunctionTool[AstrAgentContext]):
+    plugin: Any = Field(default=None, repr=False)
+    name: str = TOOL_NAME
+    description: str = DEFAULT_TOOL_DESCRIPTION
+    parameters: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "image_url": {
+                    "type": "string",
+                    "description": (
+                        "可选。要识别的图片 URL、本地路径或 file:// URI。"
+                        "留空时自动使用当前消息或引用消息中的图片。"
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "description": "可选。AnimeTrace 模型 ID；不确定时留空。",
+                },
+                "qq": {
+                    "type": "string",
+                    "description": "可选。要识别 QQ 头像时填写 QQ 号。",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "可选。每个检测区域最多返回多少个候选，默认使用插件配置。",
+                    "minimum": 1,
+                    "maximum": 20,
+                },
+            },
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        **kwargs: Any,
+    ) -> str:
+        if self.plugin is None:
+            return "AnimeTrace 识图工具未绑定插件实例，请重载插件。"
+
+        event = getattr(getattr(context, "context", None), "event", None)
+        return await self.plugin.recognize_for_tool(
+            event=event,
+            image_url=_clean_text(kwargs.get("image_url")),
+            model=_clean_text(kwargs.get("model")),
+            qq=_clean_text(kwargs.get("qq")),
+            max_results=kwargs.get("max_results"),
+        )
+
+
 @register(
-    "astrbot_plugin_shitu",
-    "aurora",
-    "AnimeTrace图片识别插件",
-    "4.0",
-    "https://github.com/Aurora-xk/astrbot_plugin_shitu",
+    PLUGIN_ID,
+    PLUGIN_AUTHOR,
+    PLUGIN_DESC,
+    PLUGIN_VERSION,
+    PLUGIN_REPO,
 )
-class AnimeTracePlugin(Star):
+class AnimeTraceLLMPlugin(Star):
     def __init__(self, context: Context, config=None):
-        super().__init__(context)
+        super().__init__(context, config)
+        self.config = config or {}
         self.api_url: str = "https://api.animetrace.com/v1/search"
         self.model_list_url: str = "https://api.animetrace.com/v1/model/list"
         self.waiting_sessions = {}
@@ -65,21 +214,61 @@ class AnimeTracePlugin(Star):
         self._model_cache_time = 0
         self._model_cache_ttl = 3600
 
-        shitu_config = (
-            config.get("shitu_settings", {})
-            if config
-            else getattr(self.context, "_config", {}).get("shitu_settings", {})
-        )
+        plugin_config = self._section(CONFIG_SECTION)
         for key, default in DEFAULT_CONFIG.items():
-            setattr(self, key, shitu_config.get(key, default))
+            setattr(self, key, plugin_config.get(key, default))
+        self.llm_tool_enabled = _read_bool(self.llm_tool_enabled, True)
+        self.inject_llm_tool_hint = _read_bool(self.inject_llm_tool_hint, True)
+        self.llm_tool_max_results = _read_int(
+            self.llm_tool_max_results,
+            5,
+            minimum=1,
+            maximum=20,
+        )
+        self.tool_request_keywords = _read_list(
+            self.tool_request_keywords,
+            DEFAULT_TOOL_REQUEST_KEYWORDS,
+        )
+        self.tool_description = _clean_text(
+            self.tool_description,
+            DEFAULT_TOOL_DESCRIPTION,
+        )
+        self._register_llm_tool()
+
+    def _section(self, key: str) -> dict[str, Any]:
+        if hasattr(self.config, "get"):
+            value = self.config.get(key, {})
+            if isinstance(value, dict):
+                return value
+        fallback = getattr(self.context, "_config", {})
+        if isinstance(fallback, dict):
+            value = fallback.get(key, {})
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    def _register_llm_tool(self) -> None:
+        self.context.add_llm_tools(
+            AnimeTraceIdentifyTool(
+                plugin=self,
+                description=self.tool_description,
+                active=self.llm_tool_enabled,
+            )
+        )
+
+    async def _ensure_session(self) -> None:
+        if self._session and not self._session.closed:
+            return
+        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
 
     async def initialize(self):
-        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        await self._ensure_session()
         await self._fetch_models()
-        logger.info("AnimeTrace图片识别插件已加载")
+        logger.info("[%s] AnimeTrace LLM 图片识别插件已加载", PLUGIN_ID)
 
     async def _fetch_models(self):
         try:
+            await self._ensure_session()
             async with self._session.get(self.model_list_url) as response:
                 if response.status != 200:
                     logger.warning(f"获取模型列表失败: HTTP {response.status}")
@@ -116,19 +305,23 @@ class AnimeTracePlugin(Star):
         if self._current_model:
             return self._current_model
 
-        return self._default_model or self._models[0]
+        if self._default_model:
+            return self._default_model
+        if self._models:
+            return self._models[0]
+        return {"id": FALLBACK_MODEL_ID, "name": FALLBACK_MODEL_ID, "enabled": True}
 
-    @filter.command("识别")
+    @filter.command(IMAGE_COMMAND)
     async def trace_search(self, event: AstrMessageEvent, args=None):
         default_model = await self._get_default_model()
         return await self.handle_image_recognition(event, default_model["id"])
 
-    @filter.command("头像识别")
+    @filter.command(AVATAR_COMMAND)
     async def avatar_trace_search(self, event: AstrMessageEvent, args=None):
         default_model = await self._get_default_model()
         return await self.handle_avatar_recognition(event, default_model["id"])
 
-    @filter.command("amt model")
+    @filter.command(MODEL_COMMAND)
     async def model_list(self, event: AstrMessageEvent, args=None):
         await self._fetch_models()
 
@@ -178,7 +371,7 @@ class AnimeTracePlugin(Star):
             line += f"\n   状态: {'✅ 可用' if enabled else '❌ 不可用'}"
             lines.append(line)
 
-        lines.append("\n使用 /amt model 数字 切换模型")
+        lines.append(f"\n使用 /{MODEL_COMMAND} 数字 切换模型")
         await event.send(event.plain_result("\n".join(lines)))
 
     async def handle_image_recognition(self, event: AstrMessageEvent, model: str):
@@ -226,7 +419,10 @@ class AnimeTracePlugin(Star):
                 await event.send(event.plain_result("📸 识别您自己的头像..."))
             else:
                 full_text = self._get_full_text(event.get_messages())
-                qq_match = re.search(r"头像识别\s*(\d{5,12})", full_text)
+                qq_match = re.search(
+                    rf"{re.escape(AVATAR_COMMAND)}\s*(\d{{5,12}})",
+                    full_text,
+                )
                 if qq_match and qq_match.group(1) == mentioned_user_id:
                     await event.send(
                         event.plain_result(f"📸 识别QQ号 {mentioned_user_id} 的头像...")
@@ -251,7 +447,7 @@ class AnimeTracePlugin(Star):
         full_text = self._get_full_text(messages)
 
         if not hasattr(event, "_avatar_command_processed"):
-            if re.search(r"头像识别", full_text):
+            if re.search(rf"(?:^|\s|/){re.escape(AVATAR_COMMAND)}", full_text):
                 event._avatar_command_processed = True
                 default_model = await self._get_default_model()
                 await self.handle_avatar_recognition(event, default_model["id"])
@@ -276,24 +472,42 @@ class AnimeTracePlugin(Star):
             del self.timeout_tasks[user_id]
         await self.process_image_recognition(event, image_url, session["model"])
 
-    async def process_image_recognition(
-        self, event: AstrMessageEvent, image_url: str, model: str
-    ):
+    async def _recognize_image_source(self, image_url: str, model: str) -> dict:
+        await self._ensure_session()
+        temp_paths: list[str] = []
         try:
             if image_url.startswith(("http://", "https://")):
                 results = await self.call_animetrace_api_with_url(image_url, model)
                 if not results or not results.get("data"):
                     logger.debug("URL识别方式未返回结果，尝试file方式...")
                     temp_path = await self.download_to_temp_file(image_url)
-                    if temp_path:
-                        results = await self.call_animetrace_api_with_file(
-                            temp_path, model
-                        )
-            elif os.path.isfile(image_url):
-                results = await self.call_animetrace_api_with_file(image_url, model)
-            else:
-                raise Exception("不支持的图片来源")
+                    temp_paths.append(temp_path)
+                    results = await self.call_animetrace_api_with_file(temp_path, model)
+                return results
 
+            if image_url.startswith("file://"):
+                temp_path = urllib.parse.unquote(image_url.replace("file://", ""))
+                if os.name == "nt" and temp_path.startswith("/"):
+                    temp_path = temp_path[1:]
+                image_url = temp_path
+
+            if os.path.isfile(image_url):
+                return await self.call_animetrace_api_with_file(image_url, model)
+
+            raise Exception("不支持的图片来源")
+        finally:
+            for temp_path in temp_paths:
+                try:
+                    if temp_path and os.path.isfile(temp_path):
+                        os.remove(temp_path)
+                except Exception as exc:
+                    logger.debug(f"删除临时图片失败: {exc}")
+
+    async def process_image_recognition(
+        self, event: AstrMessageEvent, image_url: str, model: str
+    ):
+        try:
+            results = await self._recognize_image_source(image_url, model)
             await self.send_combined_result(event, image_url, results, model)
 
         except Exception as e:
@@ -342,7 +556,10 @@ class AnimeTracePlugin(Star):
         messages = event.get_messages()
         full_text = self._get_full_text(messages)
 
-        qq_match = re.search(r"头像识别\s*(\d{5,12})", full_text)
+        qq_match = re.search(
+            rf"{re.escape(AVATAR_COMMAND)}\s*(\d{{5,12}})",
+            full_text,
+        )
         if qq_match:
             return qq_match.group(1)
 
@@ -438,6 +655,39 @@ class AnimeTracePlugin(Star):
             logger.warning(f"检查引用消息图片时出错: {str(e)}")
 
         return None
+
+    def _event_has_image_reference(self, event: AstrMessageEvent) -> bool:
+        try:
+            messages = event.get_messages()
+        except Exception:
+            messages = []
+
+        for msg in messages:
+            if isinstance(msg, MsgImage):
+                return True
+            if isinstance(msg, Reply) and hasattr(msg, "chain") and msg.chain:
+                if any(isinstance(reply_msg, MsgImage) for reply_msg in msg.chain):
+                    return True
+
+        try:
+            raw_message = getattr(event.message_obj, "raw_message", None)
+            if raw_message:
+                attachments = getattr(raw_message, "attachments", None)
+                if attachments and isinstance(attachments, list):
+                    if any(getattr(attachment, "url", None) for attachment in attachments):
+                        return True
+
+                item_list = (
+                    raw_message.get("item_list")
+                    if isinstance(raw_message, dict)
+                    else getattr(raw_message, "item_list", None)
+                )
+                if item_list and isinstance(item_list, list):
+                    return any(int(item.get("type") or 0) == 2 for item in item_list)
+        except Exception as exc:
+            logger.debug(f"检查消息图片引用失败: {exc}")
+
+        return False
 
     def _get_image_reference(self, msg) -> str:
         """获取图片组件的引用（优先url，其次file）"""
@@ -623,9 +873,115 @@ class AnimeTracePlugin(Star):
 
         return "\n".join(lines)
 
+    def _format_score_suffix(self, char: dict[str, Any]) -> str:
+        for key in ("score", "similarity", "confidence", "prob"):
+            value = char.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return f"，{key}: {value}"
+            if 0 <= number <= 1:
+                return f"，{key}: {number:.2%}"
+            return f"，{key}: {number:g}"
+        return ""
+
+    def format_tool_results(
+        self,
+        data: dict,
+        model: str,
+        *,
+        max_results: int | None = None,
+    ) -> str:
+        data_list = data.get("data") or []
+        if not data_list:
+            return (
+                "AnimeTrace 没有找到匹配结果。"
+                "请告诉用户无法可靠识别这张图，不要编造角色或作品。"
+            )
+
+        limit = max_results or self.llm_tool_max_results
+        limit = _read_int(limit, self.llm_tool_max_results, minimum=1, maximum=20)
+        model_name = self._get_model_name(model)
+        lines = [
+            "AnimeTrace 识图候选结果：",
+            f"模型：{model_name}",
+            "说明：结果仅供参考，回答用户时请保留不确定性。",
+        ]
+
+        matched_roles = 0
+        for idx, item in enumerate(data_list, start=1):
+            characters = item.get("character") or []
+            if not characters:
+                continue
+            matched_roles += 1
+            box = item.get("box")
+            box_text = f"，box={box}" if box else ""
+            lines.append(f"\n检测区域 {idx}{box_text}:")
+            for rank, char in enumerate(characters[:limit], start=1):
+                name = char.get("character") or "未知角色"
+                work = char.get("work") or "未知作品"
+                suffix = self._format_score_suffix(char)
+                lines.append(f"{rank}. 角色：{name}；作品：{work}{suffix}")
+            if len(characters) > limit:
+                lines.append(f"还有 {len(characters) - limit} 个候选未展示。")
+
+        if not matched_roles:
+            return (
+                "AnimeTrace 返回了检测区域，但没有具体角色候选。"
+                "请告诉用户无法可靠识别这张图，不要编造角色或作品。"
+            )
+
+        lines.append("\n数据来源：AnimeTrace。")
+        return "\n".join(lines)
+
+    async def recognize_for_tool(
+        self,
+        *,
+        event: AstrMessageEvent | None,
+        image_url: str = "",
+        model: str = "",
+        qq: str = "",
+        max_results: Any = None,
+    ) -> str:
+        if not self.llm_tool_enabled:
+            return "AnimeTrace LLM 识图工具当前未启用。"
+
+        if qq:
+            if not re.fullmatch(r"\d{5,12}", qq):
+                return "QQ 号格式不正确，无法识别头像。"
+            image_url = f"https://q.qlogo.cn/headimg_dl?dst_uin={qq}&spec=640"
+
+        if not image_url:
+            if event is None:
+                return "没有提供图片 URL，也无法从当前会话事件中读取图片。"
+            image_url = await self.extract_image_from_event(event)
+
+        if not image_url:
+            return (
+                "当前消息或引用消息里没有找到可识别的图片。"
+                f"如果用户只是想手动识图，请提示 TA 发送图片并使用 /{IMAGE_COMMAND}。"
+            )
+
+        default_model = await self._get_default_model()
+        model_id = model or default_model["id"]
+        try:
+            results = await self._recognize_image_source(image_url, model_id)
+        except Exception as exc:
+            logger.warning(f"LLM 工具识图失败: {exc}")
+            return f"AnimeTrace 识图失败：{exc}"
+
+        return self.format_tool_results(
+            results,
+            model_id,
+            max_results=max_results,
+        )
+
     async def send_combined_result(
         self, event: AstrMessageEvent, image_url: str, results: dict, model: str
     ):
+        tmp_dir = None
         try:
             data_list = results.get("data") or []
             if not data_list:
@@ -647,7 +1003,7 @@ class AnimeTracePlugin(Star):
                 img = PILImage.open(BytesIO(img_data)).convert("RGB")
                 w, h = img.size
 
-                tmp_dir = tempfile.mkdtemp(prefix="astrbot_shitu_crops_")
+                tmp_dir = tempfile.mkdtemp(prefix="astrbot_animetrace_llm_crops_")
                 crop_paths = []
 
                 for idx, item in enumerate(data_list, start=1):
@@ -760,6 +1116,52 @@ class AnimeTracePlugin(Star):
                 await event.send(event.plain_result(response_text))
             except Exception as send_error:
                 logger.warning(f"发送文字结果也失败: {send_error}")
+        finally:
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _message_requests_tool(self, event: AstrMessageEvent) -> bool:
+        message_text = _clean_text(getattr(event, "message_str", ""))
+        if not message_text:
+            try:
+                message_text = self._get_full_text(event.get_messages())
+            except Exception:
+                message_text = ""
+        lowered = message_text.lower()
+        return any(keyword.lower() in lowered for keyword in self.tool_request_keywords)
+
+    @filter.on_llm_request(priority=-5)
+    async def inject_animetrace_tool_hint(
+        self,
+        event: AstrMessageEvent,
+        request: ProviderRequest,
+    ) -> None:
+        if not self.llm_tool_enabled or not self.inject_llm_tool_hint:
+            return
+
+        has_image = self._event_has_image_reference(event)
+        if not has_image and not self._message_requests_tool(event):
+            return
+
+        hint = (
+            "[AnimeTrace 识图工具提示]\n"
+            f"可用工具：`{TOOL_NAME}`。\n"
+            "当用户发送或引用图片并询问“这是谁、哪个角色、出处、识图、动漫/GalGame角色”，"
+            "或你无法可靠判断图片内容时，优先调用该工具；不要直接猜测。"
+            "如果图片在当前消息或引用消息里，调用时可以不填 image_url。"
+            "工具返回的是候选结果，不保证绝对准确；最终回答应说明最可能的角色/作品，并保留不确定性。"
+        )
+
+        try:
+            request.extra_user_content_parts.append(TextPart(text=hint).mark_as_temp())
+        except Exception:
+            system_prompt = getattr(request, "system_prompt", "") or ""
+            if hint not in system_prompt:
+                request.system_prompt = (
+                    f"{system_prompt}\n\n{hint}"
+                    if system_prompt
+                    else hint
+                )
 
     async def timeout_check(self, user_id: str):
         try:
@@ -780,7 +1182,7 @@ class AnimeTracePlugin(Star):
             logger.error(f"超时检查任务异常: {str(e)}")
 
     async def terminate(self):
-        logger.info("AnimeTrace图片识别插件已卸载")
+        logger.info("[%s] AnimeTrace LLM 图片识别插件已卸载", PLUGIN_ID)
         for task in self.timeout_tasks.values():
             task.cancel()
         self.timeout_tasks.clear()

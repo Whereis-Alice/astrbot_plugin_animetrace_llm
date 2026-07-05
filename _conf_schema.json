@@ -1,49 +1,91 @@
 {
-  "shitu_settings": {
-    "description": "AnimeTrace图片识别插件设置",
+  "animetrace_llm_settings": {
+    "description": "AnimeTrace LLM 识图插件设置",
     "type": "object",
     "items": {
       "timeout_seconds": {
         "description": "等待用户发送图片的超时时间（秒）",
         "type": "int",
         "default": 30,
-        "hint": "建议设置为30-60秒，给用户足够的时间发送图片"
+        "hint": "手动发送 /at识图 后，用户需要在该时间内补发图片"
       },
       "prompt_send_image": {
         "description": "提示用户发送图片的文字",
         "type": "string",
         "default": "📷 请发送要识别的图片（30秒内有效）",
-        "hint": "可以自定义提示文字"
+        "hint": "仅手动等待模式使用"
       },
       "prompt_timeout": {
         "description": "用户超时后的提示文字",
-        "type": "string", 
+        "type": "string",
         "default": "⏰ 识别请求已超时，请重新发送命令",
-        "hint": "可以自定义超时提示文字"
+        "hint": "仅手动等待模式使用"
       },
       "return_crops": {
-        "description": "是否在文字结果后发送裁剪出的角色图片",
+        "description": "手动命令识图时是否发送裁剪出的角色图片",
         "type": "bool",
         "default": true,
-        "hint": "开启后会根据识别结果的box裁剪人物区域并发送图片"
+        "hint": "LLM 工具调用只返回文本候选，不发送裁剪图"
       },
       "max_crops": {
-        "description": "每次识别最多发送的图片数量",
+        "description": "手动命令每次最多发送的裁剪图片数量",
         "type": "int",
         "default": 5,
         "hint": "过大可能导致一次发送过多图片"
       },
       "max_characters_per_role": {
-        "description": "每个角色识别结果最多显示的角色数量",
+        "description": "手动命令中每个检测区域最多显示多少个候选",
         "type": "int",
         "default": 5,
-        "hint": "设置为0或负数表示不限制"
+        "hint": "设置为 0 或负数表示不限制"
       },
       "forward_threshold": {
-        "description": "识别到多少个角色时自动使用合并转发（聊天记录）发送",
+        "description": "手动命令识别到多少个角色时使用 QQ 合并转发",
         "type": "int",
         "default": 0,
-        "hint": "设置为0表示关闭合并转发；仅支持 aiocqhttp 适配器（QQ），其他适配器会自动回退到普通消息"
+        "hint": "设置为 0 表示关闭；仅 aiocqhttp 支持，其他适配器会回退到普通消息"
+      },
+      "llm_tool_enabled": {
+        "description": "是否注册 LLM 识图工具",
+        "type": "bool",
+        "default": true,
+        "hint": "启用后主 LLM 可调用 animetrace_identify_image 工具识别当前图片或引用图片"
+      },
+      "inject_llm_tool_hint": {
+        "description": "是否在相关 LLM 请求中注入工具使用提示",
+        "type": "bool",
+        "default": true,
+        "hint": "仅在消息包含图片/引用图片，或文本命中识图关键词时注入"
+      },
+      "llm_tool_max_results": {
+        "description": "LLM 工具每个检测区域最多返回多少个候选",
+        "type": "int",
+        "default": 5,
+        "hint": "建议 3-8，太多会占用上下文"
+      },
+      "tool_request_keywords": {
+        "description": "触发 LLM 工具提示注入的关键词",
+        "type": "list",
+        "default": [
+          "识图",
+          "识别图片",
+          "识别这张图",
+          "这是谁",
+          "哪个角色",
+          "角色是谁",
+          "出自哪里",
+          "出处",
+          "动漫",
+          "gal",
+          "galgame"
+        ],
+        "hint": "用户消息包含这些词时，会提醒 LLM 可调用识图工具"
+      },
+      "tool_description": {
+        "description": "LLM 工具描述",
+        "type": "text",
+        "default": "AnimeTrace 二次元图片识别工具。当用户发送或引用图片，并询问图片里的动漫/GalGame/二次元角色、作品出处，或者你自己无法确定图片内容时调用。工具会返回候选角色和作品名，结果仅供参考，回答时要保留不确定性。",
+        "hint": "高级设置：会直接影响模型何时主动调用工具"
       }
     }
   }

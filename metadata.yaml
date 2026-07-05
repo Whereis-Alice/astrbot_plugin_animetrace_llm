@@ -1,8 +1,10 @@
-name: astrbot_plugin_shitu
-desc: 一个简单的识别gal，动漫的astrbot插件
-version: v4.0
-author: deepseekR1&kimi&Aurora-xk
-repo : https://github.com/Aurora-xk/astrbot_plugin_shitu
+name: astrbot_plugin_animetrace_llm
+display_name: AnimeTrace LLM 识图
+desc: AnimeTrace 图片识别 fork，支持手动命令识图，并注册为 LLM 可主动调用的识图工具
+version: v4.1.0
+author: Huli3
+repo: https://github.com/Whereis-Alice/astrbot_plugin_animetrace_llm
+astrbot_version: ">=4.16,<5"
 support_platforms:
   - telegram
   - aiocqhttp
