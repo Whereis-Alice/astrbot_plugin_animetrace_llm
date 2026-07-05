@@ -1,7 +1,7 @@
 name: astrbot_plugin_animetrace_llm
 display_name: AnimeTrace LLM 识图
 desc: AnimeTrace 图片识别 fork，支持手动命令识图，并注册为 LLM 可主动调用的识图工具
-version: v4.1.0
+version: v4.1.1
 author: Huli3
 repo: https://github.com/Whereis-Alice/astrbot_plugin_animetrace_llm
 astrbot_version: ">=4.16,<5"

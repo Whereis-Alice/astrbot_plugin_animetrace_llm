@@ -7,7 +7,7 @@
         "description": "等待用户发送图片的超时时间（秒）",
         "type": "int",
         "default": 30,
-        "hint": "手动发送 /at识图 后，用户需要在该时间内补发图片"
+        "hint": "手动发送 /识别 后，用户需要在该时间内补发图片"
       },
       "prompt_send_image": {
         "description": "提示用户发送图片的文字",

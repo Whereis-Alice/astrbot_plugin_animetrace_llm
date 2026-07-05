@@ -28,14 +28,14 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 PLUGIN_ID = "astrbot_plugin_animetrace_llm"
 PLUGIN_AUTHOR = "Huli3"
 PLUGIN_DESC = "AnimeTrace 图片识别 fork：支持命令识图，并注册为 LLM 可主动调用的工具"
-PLUGIN_VERSION = "4.1.0"
+PLUGIN_VERSION = "4.1.1"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_animetrace_llm"
 
 CONFIG_SECTION = "animetrace_llm_settings"
 TOOL_NAME = "animetrace_identify_image"
-IMAGE_COMMAND = "at识图"
-AVATAR_COMMAND = "at头像识图"
-MODEL_COMMAND = "at模型"
+IMAGE_COMMAND = "识别"
+AVATAR_COMMAND = "头像识别"
+MODEL_COMMAND = "amt model"
 FALLBACK_MODEL_ID = "animetrace-yuri-4.2"
 
 DEFAULT_TOOL_REQUEST_KEYWORDS = [

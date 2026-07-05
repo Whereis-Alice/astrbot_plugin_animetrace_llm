@@ -9,16 +9,15 @@
 - 本 fork 基于上游 `main` 分支，参考提交：`1a30fdd803806f4fb644476ddc0b65312b607d1c`
 - 本 fork 插件名：`astrbot_plugin_animetrace_llm`
 
-为避免和上游插件同时安装时冲突，本 fork 已更换：
+为避免和上游插件在插件标识层面冲突，本 fork 已更换：
 
 - 插件注册名：`astrbot_plugin_animetrace_llm`
 - Python 插件类名：`AnimeTraceLLMPlugin`
 - 配置节：`animetrace_llm_settings`
-- 手动识图命令：`/at识图`
-- 头像识别命令：`/at头像识图`
-- 模型切换命令：`/at模型`
 - LLM 工具名：`animetrace_identify_image`
 - 临时裁剪目录前缀：`astrbot_animetrace_llm_crops_`
+
+手动命令按要求保留上游原命令，因此不要和上游插件同时启用同一批命令，否则会发生命令响应冲突。
 
 ## 功能
 
@@ -34,10 +33,10 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `/at识图` | 识别图片中的二次元角色 |
-| `/at头像识图` | 识别 QQ 头像 |
-| `/at模型` | 查看当前可用模型列表 |
-| `/at模型 1` | 切换到列表中的第 1 个模型 |
+| `/识别` | 识别图片中的二次元角色 |
+| `/头像识别` | 识别 QQ 头像 |
+| `/amt model` | 查看当前可用模型列表 |
+| `/amt model 1` | 切换到列表中的第 1 个模型 |
 
 ## LLM 工具
 
